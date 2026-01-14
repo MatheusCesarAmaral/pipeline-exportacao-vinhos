@@ -1,0 +1,5 @@
+__pycache__/
+.env
+*.parquet
+*.csv
+notebooks/.ipynb_checkpoints
