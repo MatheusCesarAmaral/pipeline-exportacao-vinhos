@@ -2,95 +2,97 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-# adicionando Logs
+# Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# criando modelo Estrela
-def load_analytics(
-    exportacao_path: Path,
-    comercio_path: Path,
-    output_dir: Path
-) -> None:
+def load_analytics(exportacao_path: Path, comercio_path: Path, output_dir: Path) -> None:
     """
-    Transforma os dados da camada TRUSTED para a camada ANALYTICS
-    seguindo o modelo dimensional (Star Schema).
+    Transforma os dados da camada TRUSTED para a camada ANALYTICS (Star Schema).
+    Garante a união correta de métricas de Volume (Comércio) e Valor (Exportação).
     """
     try:
         logging.info("Lendo dados da camada TRUSTED...")
-        df_export = pd.read_csv(exportacao_path)
-        df_comercio = pd.read_csv(comercio_path)
+        # Lendo em UTF-8 já que padronizamos os scripts de transformação
+        df_export = pd.read_csv(exportacao_path, encoding='utf-8')
+        df_comercio = pd.read_csv(comercio_path, encoding='utf-8')
 
         # ==========================================================
-        # DIMENSÃO PAÍS (Garante IDs únicos para cada país)
+        # PADRONIZAÇÃO DE COLUNAS
         # ==========================================================
-        dim_pais = (
-            pd.concat([
-                df_export[["pais_destino"]],
-                df_comercio[["pais_destino"]]
-            ])
-            .drop_duplicates()
-            .sort_values("pais_destino")
-            .reset_index(drop=True)
-        )
-        dim_pais["id_pais"] = dim_pais.index + 1
-        dim_pais = dim_pais[["id_pais", "pais_destino"]]
+        # Garante que 'nome_entidade' seja o padrão, não importa a origem
+        df_export = df_export.rename(columns={"pais_destino": "nome_entidade"})
+        df_comercio = df_comercio.rename(columns={
+            "item_comercializado": "nome_entidade", 
+            "pais_destino": "nome_entidade"
+        })
+
+        df_export["origem_dado"] = "EXPORTAÇÃO"
+        df_comercio["origem_dado"] = "COMÉRCIO LOCAL"
 
         # ==========================================================
-        # DIMENSÃO TEMPO (Garante IDs únicos para cada ano)
+        # TRATAMENTO DE MÉTRICAS (Crucial para não gerar NaNs)
         # ==========================================================
-        dim_tempo = (
-            pd.concat([
-                df_export[["ano"]],
-                df_comercio[["ano"]]
-            ])
-            .drop_duplicates()
-            .sort_values("ano")
-            .reset_index(drop=True)
-        )
+        # Garante que as colunas de métricas existam em ambos os DataFrames
+        for df in [df_export, df_comercio]:
+            if "quantidade_litros" not in df.columns:
+                df["quantidade_litros"] = 0
+            if "valor_usd" not in df.columns:
+                df["valor_usd"] = 0
+            
+            # Preenche nulos caso algum valor tenha vindo vazio
+            df["quantidade_litros"] = df["quantidade_litros"].fillna(0)
+            df["valor_usd"] = df["valor_usd"].fillna(0)
+
+        # ==========================================================
+        # DIMENSÃO ENTIDADE (País ou Produto)
+        # ==========================================================
+        dim_entidade = pd.concat([
+            df_export[["nome_entidade"]],
+            df_comercio[["nome_entidade"]]
+        ]).drop_duplicates().sort_values("nome_entidade").reset_index(drop=True)
+        
+        dim_entidade["id_entidade"] = dim_entidade.index + 1
+
+        # ==========================================================
+        # DIMENSÃO TEMPO
+        # ==========================================================
+        dim_tempo = pd.concat([
+            df_export[["ano"]], 
+            df_comercio[["ano"]]
+        ]).drop_duplicates().sort_values("ano").reset_index(drop=True)
+        
         dim_tempo["id_tempo"] = dim_tempo.index + 1
-        dim_tempo = dim_tempo[["id_tempo", "ano"]]
 
         # ==========================================================
-        # FATO EXPORTACAO (Une métricas de volume e valor)
+        # FATO CONSOLIDADA (Star Schema)
         # ==========================================================
-        fato = pd.merge(
-            df_export,
-            df_comercio,
-            on=["pais_destino", "ano"],
-            how="outer"
-        ).fillna(0) 
-
-        # substituímos os nomes (texto) pelos IDs das dimensões
-        fato = fato.merge(dim_pais, on="pais_destino", how="left")
+        # Unificamos apenas as colunas necessárias para a Fato
+        cols_base = ["nome_entidade", "ano", "origem_dado", "quantidade_litros", "valor_usd"]
+        fato = pd.concat([df_export[cols_base], df_comercio[cols_base]], ignore_index=True)
+        
+        # Merge para trocar nomes textuais pelos IDs das Dimensões
+        fato = fato.merge(dim_entidade, on="nome_entidade", how="left")
         fato = fato.merge(dim_tempo, on="ano", how="left")
 
-        # selecionamos apenas as chaves (FKs) e as métricas
-        fato_exportacao = fato[
-            [
-                "id_pais",
-                "id_tempo",
-                "quantidade_litros",
-                "valor_usd"
-            ]
-        ]
-
         # ==========================================================
-        # SALVAR CAMADA ANALYTICS
+        # SALVAMENTO
         # ==========================================================
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        dim_entidade.to_csv(output_dir / "dim_entidade.csv", index=False, encoding='utf-8')
+        dim_tempo.to_csv(output_dir / "dim_tempo.csv", index=False, encoding='utf-8')
+        
+        # Salvamos a fato apenas com as chaves estrangeiras (FKs) e métricas
+        colunas_fato = ["id_entidade", "id_tempo", "origem_dado", "quantidade_litros", "valor_usd"]
+        fato[colunas_fato].to_csv(output_dir / "fato_consolidada.csv", index=False, encoding='utf-8')
 
-        dim_pais.to_csv(output_dir / "dim_pais.csv", index=False)
-        dim_tempo.to_csv(output_dir / "dim_tempo.csv", index=False)
-        fato_exportacao.to_csv(output_dir / "fato_exportacao.csv", index=False)
-
-        logging.info(f"Camada Analytics salva com sucesso em: {output_dir}")
+        logging.info(f"Sucesso! Camada Analytics gerada em: {output_dir}")
 
     except Exception as e:
-        logging.error(f"Erro ao processar camada Analytics: {e}")
+        logging.error(f"Erro crítico no Analytics: {e}")
         raise
 
 def main():
-    # localização dinâmica baseada na posição deste script
     script_path = Path(__file__).resolve().parent
     project_root = script_path.parent.parent
     
@@ -98,16 +100,11 @@ def main():
     comercio_trusted = project_root / "data" / "trusted" / "comercio_trusted.csv"
     analytics_dir = project_root / "data" / "analytics"
 
-    # verifica se os arquivos de entrada existem
     if not exportacao_trusted.exists() or not comercio_trusted.exists():
-        logging.error("Arquivos da camada TRUSTED não encontrados. Rode as transformações primeiro.")
+        logging.error("Arquivos TRUSTED não encontrados. Rode as transformações primeiro.")
         return
 
-    load_analytics(
-        exportacao_trusted,
-        comercio_trusted,
-        analytics_dir
-    )
+    load_analytics(exportacao_trusted, comercio_trusted, analytics_dir)
 
 if __name__ == "__main__":
     main()

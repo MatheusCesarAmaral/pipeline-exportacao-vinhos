@@ -2,59 +2,62 @@ import pandas as pd
 from pathlib import Path
 import logging
 
-# adicionando Logs
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(levelname)s: %(message)s'
-)
+# Configuração de Logs
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# transformando o arquivo comercio_raw.csv
 def transform_comercio(raw_path: Path, trusted_path: Path) -> None:
-    """
-    Lê os dados de comércio da Embrapa, realiza o unpivot dos anos,
-    trata tipos de dados e salva na camada Trusted.
-    """
     try:
         logging.info(f"Lendo dados RAW: {raw_path}")
         
-        # O sep=None com engine='python' detecta automaticamente se é vírgula ou ponto e vírgula
-        df = pd.read_csv(raw_path, sep=None, engine='python', encoding='utf-8')
+        # FORÇANDO o separador ';' e o encoding 'utf-8' que identificamos nos seus arquivos
+        df = pd.read_csv(raw_path, sep=';', encoding='utf-8')
 
-        # padronização dos nomes de colunas
+        # Verificação de segurança: se após ler com ';' ainda houver apenas 1 coluna,
+        # tentamos ler com vírgula ','
+        if len(df.columns) < 2:
+            df = pd.read_csv(raw_path, sep=',', encoding='utf-8')
+
+        if len(df.columns) < 3:
+            logging.error(f"Erro: O arquivo {raw_path} não possui colunas suficientes. Verifique o separador.")
+            return
+
+        # 1. Padronização de nomes de colunas
         df.columns = [str(col).strip().lower().replace(" ", "_").replace("-", "_") for col in df.columns]
 
-        # identificar dinamicamente a coluna de País e as colunas de Anos
-        col_pais = df.columns[0]
-        cols_anos = [c for c in df.columns if c.replace('_', '').isdigit()] 
+        # 2. Identificação da Coluna de Produto (Índice 2)
+        col_prod = df.columns[2]
+        cols_anos = [c for c in df.columns if c.isdigit()] 
 
-        logging.info(f"Colunas de anos detectadas: {len(cols_anos)}")
-
-        # normalização (Unpivot/Melt)
+        # 3. Normalização (Unpivot/Melt)
+        # O dado de comércio da Embrapa é VOLUME (Litros)
         df_long = df.melt(
-            id_vars=[col_pais],
+            id_vars=[col_prod],
             value_vars=cols_anos,
             var_name="ano",
-            value_name="valor_usd"
+            value_name="quantidade_litros"
         )
 
-        # renomear e limpar strings da coluna de destino
-        df_long = df_long.rename(columns={col_pais: "pais_destino"})
-        df_long["pais_destino"] = df_long["pais_destino"].astype(str).str.strip().str.upper()
+        # 4. Renomear e limpar nomes
+        df_long = df_long.rename(columns={col_prod: "nome_entidade"})
+        df_long["nome_entidade"] = df_long["nome_entidade"].astype(str).str.strip().str.title()
 
-        # conversão de tipos robusta
-        df_long["valor_usd"] = pd.to_numeric(df_long["valor_usd"], errors="coerce").fillna(0)
-        df_long["ano"] = pd.to_numeric(df_long["ano"], errors="coerce")
-
-        # limpeza final de registros inválidos
-        df_long = df_long.dropna(subset=["ano"])
-        df_long["ano"] = df_long["ano"].astype(int)
+        # 5. Filtragem de Hierarquia (Evita duplicidade)
+        categorias_remover = [
+            "Total", "Vinho De Mesa", "Vinho Fino De Mesa", 
+            "Suco De Uva", "Derivados", "Outros Produtos Comercializados"
+        ]
         
-        df_long = df_long[~df_long["pais_destino"].str.contains("TOTAL", na=False)]
-        
-        df_long = df_long[df_long["pais_destino"] != "NAN"]
+        regex_filtro = "|".join(categorias_remover)
+        df_long = df_long[~df_long["nome_entidade"].str.contains(regex_filtro, na=False, case=False)]
+        df_long = df_long[df_long["nome_entidade"] != "Nan"]
 
-        # salvando o arquivo na camada TRUSTED
-        logging.info(f"Salvando dados TRUSTED em: {trusted_path}")
+        # 6. Tipagem e criação da coluna de Valor (zerada para mercado interno)
+        df_long["quantidade_litros"] = pd.to_numeric(df_long["quantidade_litros"], errors="coerce").fillna(0)
+        df_long["valor_usd"] = 0 
+        df_long["ano"] = pd.to_numeric(df_long["ano"]).astype(int)
+
+        # 7. Salvamento
+        logging.info(f"Salvando dados TRUSTED: {trusted_path}")
         trusted_path.parent.mkdir(parents=True, exist_ok=True)
         df_long.to_csv(trusted_path, index=False, encoding='utf-8')
 
@@ -65,15 +68,12 @@ def transform_comercio(raw_path: Path, trusted_path: Path) -> None:
         raise
 
 def main():
-    # localização dinâmica baseada na posição deste script
     script_path = Path(__file__).resolve().parent
     project_root = script_path.parent.parent
     
-    # definição dos caminhos conforme sua estrutura
     raw_file = project_root / "data" / "raw" / "comercio_raw.csv"
     trusted_file = project_root / "data" / "trusted" / "comercio_trusted.csv"
 
-    # verifica se o arquivo de origem existe antes de começar
     if not raw_file.exists():
         logging.error(f"Arquivo não encontrado: {raw_file}")
         return
