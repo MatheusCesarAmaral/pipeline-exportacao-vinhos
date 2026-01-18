@@ -20,7 +20,7 @@ def extract_embrapa_online(url: str, output_path: Path, sep: str = ";", encoding
         # garante que a pasta pai existe antes de salvar
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        df.to_csv(output_path, index=False)
+        df.to_csv(output_path, index=False, encoding='utf-8')
         logging.info(f"Dados salvos com sucesso em: {output_path}")
         return True
 
@@ -29,19 +29,28 @@ def extract_embrapa_online(url: str, output_path: Path, sep: str = ";", encoding
         return False
 
 def main():
+    # identifica a pasta onde este script está
+    script_path = Path(__file__).resolve().parent
+    
+    project_root = script_path.parent.parent 
+    
+    raw_dir = project_root / "data" / "raw"
+
     urls = {
         "comercio": "https://vitibrasil.cnpuv.embrapa.br/download/Comercio.csv",
         "exportacao": "https://vitibrasil.cnpuv.embrapa.br/download/ExpVinho.csv",
     }
 
-    raw_dir = Path("data/raw")
-
     for name, url in urls.items():
         output_file = raw_dir / f"{name}_raw.csv"
+        
+        logging.info(f"Iniciando extração de: {name}")
         sucesso = extract_embrapa_online(url, output_file)
         
         if sucesso:
-            print(f"Item '{name}' processado.\n")
+            logging.info(f"Item '{name}' finalizado com sucesso.\n")
+        else:
+            logging.warning(f"Falha ao processar item '{name}'.\n")
 
 if __name__ == "__main__":
     main()
